@@ -1,7 +1,9 @@
-// Google Trends Scraper - Replicates Apify Google Trends Scraper functionality
-// Uses two-step approach: 1) Get widget tokens from /explore, 2) Fetch data from widget endpoints
+// Google Trends Scraper - Using Camoufox for stealth browsing
+// Intercepts API responses directly from the browser
 import { Actor, log } from 'apify';
-import { gotScraping } from 'got-scraping';
+import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
+import { PlaywrightCrawler } from 'crawlee';
+import { firefox } from 'playwright';
 
 await Actor.init();
 
@@ -21,27 +23,10 @@ const TIME_RANGES = {
     '': 'today 12-m'
 };
 
-// Random user agents for rotation
-const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-];
-
-function getRandomUserAgent() {
-    return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-}
-
 /**
  * Strip the security prefix from Google Trends API responses
  */
-function parseResponse(body) {
-    // Check if response is HTML (blocked/error page)
-    if (body.trim().startsWith('<')) {
-        throw new Error('Received HTML response instead of JSON - request may be blocked');
-    }
-
+function parseApiResponse(body) {
     let cleanBody = body;
     if (cleanBody.startsWith(")]}'\\n")) {
         cleanBody = cleanBody.slice(5);
@@ -54,234 +39,16 @@ function parseResponse(body) {
 }
 
 /**
- * Get proxy URL from configuration
+ * Build Google Trends explore URL
  */
-function getProxyUrl(proxyConfiguration) {
-    if (!proxyConfiguration) return undefined;
-
-    if (proxyConfiguration.useApifyProxy) {
-        const groups = proxyConfiguration.apifyProxyGroups?.join('+') || 'RESIDENTIAL';
-        return `http://groups-${groups}:${process.env.APIFY_PROXY_PASSWORD}@proxy.apify.com:8000`;
-    }
-
-    if (proxyConfiguration.proxyUrls?.length > 0) {
-        return proxyConfiguration.proxyUrls[Math.floor(Math.random() * proxyConfiguration.proxyUrls.length)];
-    }
-
-    return undefined;
-}
-
-/**
- * Make HTTP request with retry logic
- */
-async function makeRequest(url, options = {}, maxRetries = 5, proxyUrl = undefined) {
-    const userAgent = getRandomUserAgent();
-    const headers = {
-        'User-Agent': userAgent,
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'Referer': `${GOOGLE_TRENDS_URL}/explore?geo=US&hl=en-US`,
-        'Origin': 'https://trends.google.com',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-        'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"',
-        ...options.headers
-    };
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            log.debug(`Making request (attempt ${attempt}/${maxRetries}): ${url.substring(0, 100)}...`);
-
-            const requestOptions = {
-                url,
-                method: 'GET',
-                headers,
-                responseType: 'text',
-                timeout: { request: 60000 },
-                retry: { limit: 0 },
-                ...options
-            };
-
-            // Add proxy if available
-            if (proxyUrl) {
-                requestOptions.proxyUrl = proxyUrl;
-                log.debug('Using proxy for request');
-            }
-
-            const response = await gotScraping(requestOptions);
-
-            return parseResponse(response.body);
-        } catch (error) {
-            const isBlocked = error.message.includes('HTML response') ||
-                error.message.includes('blocked') ||
-                error.response?.statusCode === 429 ||
-                error.response?.statusCode === 403;
-
-            if (attempt < maxRetries) {
-                const delay = isBlocked ? 5000 * attempt : 2000 * attempt;
-                log.warning(`Request failed (attempt ${attempt}/${maxRetries}): ${error.message}. Retrying in ${delay / 1000}s...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-            } else {
-                throw error;
-            }
-        }
-    }
-}
-
-/**
- * Get widget tokens from explore endpoint
- */
-async function getExploreWidgets(searchTerm, geo, timeRange, category, maxRetries, proxyUrl) {
-    const comparisonItem = [{
-        keyword: searchTerm,
-        geo: geo || '',
-        time: TIME_RANGES[timeRange] || 'today 12-m'
-    }];
-
-    const req = {
-        comparisonItem,
-        category: category || 0,
-        property: ''
-    };
-
-    const url = new URL(`${GOOGLE_TRENDS_URL}/api/explore`);
+function buildExploreUrl(searchTerm, geo, timeRange, category) {
+    const url = new URL(`${GOOGLE_TRENDS_URL}/explore`);
+    url.searchParams.set('q', searchTerm);
     url.searchParams.set('hl', 'en-US');
-    url.searchParams.set('tz', '-300');
-    url.searchParams.set('req', JSON.stringify(req));
-
-    log.info(`Fetching explore data for: "${searchTerm}"`, { geo: geo || 'Worldwide', timeRange: timeRange || 'today 12-m' });
-
-    const data = await makeRequest(url.href, {}, maxRetries, proxyUrl);
-
-    if (!data.widgets || data.widgets.length === 0) {
-        log.warning(`No widgets returned for "${searchTerm}"`);
-        return [];
-    }
-
-    log.info(`Found ${data.widgets.length} widgets for "${searchTerm}"`);
-    return data.widgets;
-}
-
-/**
- * Fetch interest over time data from TIMESERIES widget
- */
-async function getInterestOverTime(widget, maxRetries, proxyUrl) {
-    if (!widget || !widget.token) {
-        log.debug('No TIMESERIES widget available');
-        return [];
-    }
-
-    const url = new URL(`${GOOGLE_TRENDS_URL}/api/widgetdata/multiline`);
-    url.searchParams.set('hl', 'en-US');
-    url.searchParams.set('tz', '-300');
-    url.searchParams.set('req', JSON.stringify(widget.request));
-    url.searchParams.set('token', widget.token);
-
-    try {
-        log.debug('Fetching interest over time data...');
-        const data = await makeRequest(url.href, {}, maxRetries, proxyUrl);
-        const timelineData = data.default?.timelineData || [];
-        log.info(`Got ${timelineData.length} timeline data points`);
-        return timelineData;
-    } catch (error) {
-        log.warning(`Failed to fetch interest over time: ${error.message}`);
-        return [];
-    }
-}
-
-/**
- * Fetch geographic interest data from GEO_MAP widget
- */
-async function getGeoData(widget, maxRetries, proxyUrl) {
-    if (!widget || !widget.token) {
-        log.debug('No GEO_MAP widget available');
-        return { interestBySubregion: [], interestByCity: [], interestBy: [] };
-    }
-
-    const url = new URL(`${GOOGLE_TRENDS_URL}/api/widgetdata/comparedgeo`);
-    url.searchParams.set('hl', 'en-US');
-    url.searchParams.set('tz', '-300');
-    url.searchParams.set('req', JSON.stringify(widget.request));
-    url.searchParams.set('token', widget.token);
-
-    try {
-        log.debug('Fetching geographic data...');
-        const data = await makeRequest(url.href, {}, maxRetries, proxyUrl);
-        const geoMapData = data.default?.geoMapData || [];
-
-        log.info(`Got ${geoMapData.length} geographic data points`);
-
-        // Categorize based on geo resolution
-        const resolution = widget.resolution || widget.request?.resolution;
-        if (resolution === 'provinces' || resolution === 'REGION') {
-            return { interestBySubregion: geoMapData, interestByCity: [], interestBy: [] };
-        } else if (resolution === 'cities' || resolution === 'CITY') {
-            return { interestBySubregion: [], interestByCity: geoMapData, interestBy: [] };
-        } else {
-            return { interestBySubregion: [], interestByCity: [], interestBy: geoMapData };
-        }
-    } catch (error) {
-        log.warning(`Failed to fetch geo data: ${error.message}`);
-        return { interestBySubregion: [], interestByCity: [], interestBy: [] };
-    }
-}
-
-/**
- * Fetch related searches (topics or queries) from widget
- */
-async function getRelatedSearches(widget, widgetType, maxRetries, proxyUrl) {
-    if (!widget || !widget.token) {
-        log.debug(`No ${widgetType} widget available`);
-        return { top: [], rising: [] };
-    }
-
-    const url = new URL(`${GOOGLE_TRENDS_URL}/api/widgetdata/relatedsearches`);
-    url.searchParams.set('hl', 'en-US');
-    url.searchParams.set('tz', '-300');
-    url.searchParams.set('req', JSON.stringify(widget.request));
-    url.searchParams.set('token', widget.token);
-
-    try {
-        log.debug(`Fetching ${widgetType} data...`);
-        const data = await makeRequest(url.href, {}, maxRetries, proxyUrl);
-        const rankedList = data.default?.rankedList || [];
-
-        let top = [];
-        let rising = [];
-
-        for (const list of rankedList) {
-            if (list.rankedKeyword) {
-                const items = list.rankedKeyword.map(item => ({
-                    ...item,
-                    hasData: item.hasData !== undefined ? item.hasData : true
-                }));
-
-                // Rising items typically have formattedValue with % or "Breakout"
-                const isRising = items.some(item =>
-                    item.formattedValue?.includes('%') ||
-                    item.formattedValue?.toLowerCase() === 'breakout'
-                );
-
-                if (isRising) {
-                    rising = items;
-                } else {
-                    top = items;
-                }
-            }
-        }
-
-        log.info(`Got ${top.length} top and ${rising.length} rising ${widgetType}`);
-        return { top, rising };
-    } catch (error) {
-        log.warning(`Failed to fetch ${widgetType}: ${error.message}`);
-        return { top: [], rising: [] };
-    }
+    if (geo) url.searchParams.set('geo', geo);
+    if (timeRange) url.searchParams.set('date', TIME_RANGES[timeRange] || timeRange);
+    if (category) url.searchParams.set('cat', String(category));
+    return url.href;
 }
 
 /**
@@ -302,204 +69,307 @@ function parseGoogleTrendsUrl(urlString) {
             category: parseInt(cat, 10)
         };
     } catch (error) {
-        log.warning(`Failed to parse URL: ${urlString}`);
         return null;
     }
-}
-
-/**
- * Process a single search term and return full dataset
- */
-async function processSearchTerm(inputUrlOrTerm, geo, timeRange, category, maxRetries, proxyUrl) {
-    let searchTerm = inputUrlOrTerm;
-    let effectiveGeo = geo;
-    let effectiveTimeRange = timeRange;
-    let effectiveCategory = category;
-
-    // Check if input is a Google Trends URL
-    if (inputUrlOrTerm.startsWith('http')) {
-        const parsed = parseGoogleTrendsUrl(inputUrlOrTerm);
-        if (parsed) {
-            searchTerm = parsed.searchTerm;
-            effectiveGeo = parsed.geo || geo;
-            effectiveTimeRange = parsed.timeRange || timeRange;
-            effectiveCategory = parsed.category || category;
-        }
-    }
-
-    if (!searchTerm) {
-        log.warning('No valid search term found');
-        return null;
-    }
-
-    log.info(`━━━ Processing: "${searchTerm}" ━━━`);
-
-    // Step 1: Get widget tokens from explore endpoint
-    const widgets = await getExploreWidgets(
-        searchTerm,
-        effectiveGeo,
-        effectiveTimeRange,
-        effectiveCategory,
-        maxRetries,
-        proxyUrl
-    );
-
-    if (!widgets.length) {
-        log.warning(`No widgets found for "${searchTerm}"`);
-        return null;
-    }
-
-    // Find widgets by ID
-    const timeseriesWidget = widgets.find(w => w.id === 'TIMESERIES');
-    const geoWidget = widgets.find(w => w.id === 'GEO_MAP');
-    const relatedTopicsWidget = widgets.find(w => w.id === 'RELATED_TOPICS');
-    const relatedQueriesWidget = widgets.find(w => w.id === 'RELATED_QUERIES');
-
-    // Step 2: Fetch data from each widget endpoint (with delays to avoid rate limiting)
-    log.info('Fetching widget data...');
-
-    const interestOverTime = await getInterestOverTime(timeseriesWidget, maxRetries, proxyUrl);
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    const geoData = await getGeoData(geoWidget, maxRetries, proxyUrl);
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    const relatedTopics = await getRelatedSearches(relatedTopicsWidget, 'RELATED_TOPICS', maxRetries, proxyUrl);
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    const relatedQueries = await getRelatedSearches(relatedQueriesWidget, 'RELATED_QUERIES', maxRetries, proxyUrl);
-
-    // Build result matching Apify Google Trends Scraper output format
-    const result = {
-        inputUrlOrTerm,
-        searchTerm,
-        geo: effectiveGeo || 'Worldwide',
-        timeRange: effectiveTimeRange || 'today 12-m',
-        interestOverTime_timelineData: interestOverTime || [],
-        interestOverTime_averages: [],
-        interestBySubregion: geoData.interestBySubregion || [],
-        interestByCity: geoData.interestByCity || [],
-        interestBy: geoData.interestBy || [],
-        relatedTopics_top: relatedTopics.top || [],
-        relatedTopics_rising: relatedTopics.rising || [],
-        relatedQueries_top: relatedQueries.top || [],
-        relatedQueries_rising: relatedQueries.rising || []
-    };
-
-    log.info(`✓ Completed "${searchTerm}" - ${interestOverTime.length} timeline points`);
-    return result;
 }
 
 /**
  * Main execution
  */
 async function main() {
-    try {
-        const input = (await Actor.getInput()) || {};
-        const {
-            searchTerms = [],
-            startUrls = [],
-            geo = '',
-            timeRange = '',
-            customTimeRange = '',
-            category = 0,
-            isMultiple = false,
-            maxItems = 0,
-            maxRequestRetries = 5,
-            proxyConfiguration
-        } = input;
+    const input = (await Actor.getInput()) || {};
+    const {
+        searchTerms = [],
+        startUrls = [],
+        geo = '',
+        timeRange = '',
+        customTimeRange = '',
+        category = 0,
+        isMultiple = false,
+        maxItems = 0,
+        maxRequestRetries = 5,
+        proxyConfiguration
+    } = input;
 
-        log.info('═══════════════════════════════════════════');
-        log.info('    Google Trends Scraper - Starting');
-        log.info('═══════════════════════════════════════════');
-        log.info(`Search terms: ${searchTerms.length}, Start URLs: ${startUrls.length}`);
-        log.info(`Geo: ${geo || 'Worldwide'}, Time range: ${timeRange || 'today 12-m'}`);
+    log.info('═══════════════════════════════════════════');
+    log.info('    Google Trends Scraper - Starting');
+    log.info('═══════════════════════════════════════════');
+    log.info(`Search terms: ${searchTerms.length}, Start URLs: ${startUrls.length}`);
+    log.info(`Geo: ${geo || 'Worldwide'}, Time range: ${timeRange || 'today 12-m'}`);
 
-        // Get proxy URL
-        const proxyUrl = getProxyUrl(proxyConfiguration);
-        if (proxyUrl) {
-            log.info('Using Apify Proxy');
+    // Build list of items to process
+    const itemsToProcess = [];
+
+    // Add search terms
+    for (const term of searchTerms) {
+        if (isMultiple && term.includes(',')) {
+            const splitTerms = term.split(',').map(t => t.trim()).filter(t => t);
+            itemsToProcess.push(...splitTerms);
         } else {
-            log.warning('No proxy configured - requests may be blocked');
+            itemsToProcess.push(term);
         }
-
-        // Build list of items to process
-        const itemsToProcess = [];
-
-        // Add search terms
-        for (const term of searchTerms) {
-            if (isMultiple && term.includes(',')) {
-                const splitTerms = term.split(',').map(t => t.trim()).filter(t => t);
-                itemsToProcess.push(...splitTerms);
-            } else {
-                itemsToProcess.push(term);
-            }
-        }
-
-        // Add start URLs
-        for (const urlObj of startUrls) {
-            const url = typeof urlObj === 'string' ? urlObj : urlObj.url;
-            if (url) {
-                itemsToProcess.push(url);
-            }
-        }
-
-        if (itemsToProcess.length === 0) {
-            log.error('No search terms or URLs provided. Please add searchTerms or startUrls in input.');
-            return;
-        }
-
-        // Apply maxItems limit
-        const effectiveTimeRange = customTimeRange || timeRange;
-        const processLimit = maxItems > 0 ? Math.min(maxItems, itemsToProcess.length) : itemsToProcess.length;
-
-        log.info(`Processing ${processLimit} item(s)...`);
-
-        let successCount = 0;
-        for (let i = 0; i < processLimit; i++) {
-            const item = itemsToProcess[i];
-
-            try {
-                const result = await processSearchTerm(
-                    item,
-                    geo,
-                    effectiveTimeRange,
-                    category,
-                    maxRequestRetries,
-                    proxyUrl
-                );
-
-                if (result) {
-                    await Actor.pushData(result);
-                    successCount++;
-                    log.info(`Saved to dataset: "${result.searchTerm}" (${i + 1}/${processLimit})`);
-                }
-            } catch (error) {
-                log.error(`Failed to process "${item}": ${error.message}`);
-            }
-
-            // Add delay between search terms to avoid rate limiting
-            if (i < processLimit - 1) {
-                log.debug('Waiting before next request...');
-                await new Promise(resolve => setTimeout(resolve, 2000));
-            }
-        }
-
-        log.info('═══════════════════════════════════════════');
-        log.info(`    Completed: ${successCount}/${processLimit} items`);
-        log.info('═══════════════════════════════════════════');
-
-    } catch (error) {
-        log.error('Scraping failed', { error: error.message, stack: error.stack });
-        throw error;
     }
+
+    // Add start URLs
+    for (const urlObj of startUrls) {
+        const url = typeof urlObj === 'string' ? urlObj : urlObj.url;
+        if (url) {
+            itemsToProcess.push(url);
+        }
+    }
+
+    if (itemsToProcess.length === 0) {
+        log.error('No search terms or URLs provided. Please add searchTerms or startUrls in input.');
+        await Actor.exit();
+        return;
+    }
+
+    // Apply maxItems limit
+    const effectiveTimeRange = customTimeRange || timeRange;
+    const processLimit = maxItems > 0 ? Math.min(maxItems, itemsToProcess.length) : itemsToProcess.length;
+
+    log.info(`Processing ${processLimit} item(s) using Camoufox...`);
+
+    // Setup proxy configuration
+    const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
+    const proxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
+
+    log.info(proxyUrl ? 'Using Apify Proxy with Camoufox' : 'No proxy configured');
+
+    // Process each search term
+    let successCount = 0;
+
+    for (let i = 0; i < processLimit; i++) {
+        const item = itemsToProcess[i];
+
+        // Determine search term and URL
+        let searchTerm = item;
+        let exploreUrl;
+        let effectiveGeo = geo;
+        let effectiveCat = category;
+        let effectiveTime = effectiveTimeRange;
+
+        if (item.startsWith('http')) {
+            const parsed = parseGoogleTrendsUrl(item);
+            if (parsed) {
+                searchTerm = parsed.searchTerm;
+                effectiveGeo = parsed.geo || geo;
+                effectiveTime = parsed.timeRange || effectiveTimeRange;
+                effectiveCat = parsed.category || category;
+            }
+            exploreUrl = item;
+        } else {
+            exploreUrl = buildExploreUrl(item, effectiveGeo, effectiveTime, effectiveCat);
+        }
+
+        if (!searchTerm) {
+            log.warning(`Skipping invalid item: ${item}`);
+            continue;
+        }
+
+        log.info(`━━━ Processing (${i + 1}/${processLimit}): "${searchTerm}" ━━━`);
+        log.info(`URL: ${exploreUrl}`);
+
+        // Captured API responses
+        const capturedData = {
+            interestOverTime: null,
+            geoData: null,
+            relatedTopics: null,
+            relatedQueries: null
+        };
+
+        try {
+            // Get fresh proxy URL for each request
+            const currentProxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
+
+            const crawler = new PlaywrightCrawler({
+                maxRequestRetries,
+                requestHandlerTimeoutSecs: 180,
+                navigationTimeoutSecs: 90,
+
+                launchContext: {
+                    launcher: firefox,
+                    launchOptions: await camoufoxLaunchOptions({
+                        headless: true,
+                        proxy: currentProxyUrl,
+                        geoip: true,
+                    }),
+                },
+
+                preNavigationHooks: [
+                    async ({ page }) => {
+                        // Block unnecessary resources for faster loading
+                        await page.route('**/*', async (route) => {
+                            const resourceType = route.request().resourceType();
+                            if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+                                await route.abort();
+                                return;
+                            }
+                            await route.continue();
+                        });
+
+                        // Intercept API responses
+                        page.on('response', async (response) => {
+                            const url = response.url();
+
+                            try {
+                                if (url.includes('/api/widgetdata/multiline')) {
+                                    const text = await response.text();
+                                    const data = parseApiResponse(text);
+                                    capturedData.interestOverTime = data.default?.timelineData || [];
+                                    log.info(`✓ Captured interest over time: ${capturedData.interestOverTime.length} points`);
+                                }
+
+                                if (url.includes('/api/widgetdata/comparedgeo')) {
+                                    const text = await response.text();
+                                    const data = parseApiResponse(text);
+                                    capturedData.geoData = data.default?.geoMapData || [];
+                                    log.info(`✓ Captured geo data: ${capturedData.geoData.length} regions`);
+                                }
+
+                                if (url.includes('/api/widgetdata/relatedsearches')) {
+                                    const text = await response.text();
+                                    const data = parseApiResponse(text);
+                                    const rankedList = data.default?.rankedList || [];
+
+                                    // Determine if topics or queries based on request
+                                    if (!capturedData.relatedTopics) {
+                                        capturedData.relatedTopics = rankedList;
+                                        log.info(`✓ Captured related topics`);
+                                    } else if (!capturedData.relatedQueries) {
+                                        capturedData.relatedQueries = rankedList;
+                                        log.info(`✓ Captured related queries`);
+                                    }
+                                }
+                            } catch (e) {
+                                // Ignore parse errors for non-JSON responses
+                            }
+                        });
+                    }
+                ],
+
+                requestHandler: async ({ page }) => {
+                    log.info('Page loaded, waiting for data...');
+
+                    // Wait for network to be idle
+                    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+
+                    // Additional wait for dynamic content
+                    await page.waitForTimeout(5000);
+
+                    // Try to wait for chart elements
+                    try {
+                        await page.waitForSelector('[class*="line-chart"], .fe-atoms-generic-title, [class*="interest"]', {
+                            timeout: 15000
+                        });
+                    } catch (e) {
+                        log.debug('Chart elements not found, continuing...');
+                    }
+
+                    // Wait for remaining API calls
+                    await page.waitForTimeout(3000);
+
+                    log.info('Data capture complete');
+                }
+            });
+
+            await crawler.run([{ url: exploreUrl }]);
+
+            // Process captured data
+            let topTopics = [];
+            let risingTopics = [];
+            let topQueries = [];
+            let risingQueries = [];
+
+            // Process related topics
+            if (capturedData.relatedTopics) {
+                for (const list of capturedData.relatedTopics) {
+                    if (list.rankedKeyword) {
+                        const items = list.rankedKeyword;
+                        const isRising = items.some(item =>
+                            item.formattedValue?.includes('%') ||
+                            item.formattedValue?.toLowerCase() === 'breakout'
+                        );
+                        if (isRising) {
+                            risingTopics = items;
+                        } else {
+                            topTopics = items;
+                        }
+                    }
+                }
+            }
+
+            // Process related queries  
+            if (capturedData.relatedQueries) {
+                for (const list of capturedData.relatedQueries) {
+                    if (list.rankedKeyword) {
+                        const items = list.rankedKeyword;
+                        const isRising = items.some(item =>
+                            item.formattedValue?.includes('%') ||
+                            item.formattedValue?.toLowerCase() === 'breakout'
+                        );
+                        if (isRising) {
+                            risingQueries = items;
+                        } else {
+                            topQueries = items;
+                        }
+                    }
+                }
+            }
+
+            // Determine geo data type
+            let interestBySubregion = [];
+            let interestByCity = [];
+            let interestBy = [];
+
+            if (capturedData.geoData && capturedData.geoData.length > 0) {
+                if (effectiveGeo) {
+                    interestBySubregion = capturedData.geoData;
+                } else {
+                    interestBy = capturedData.geoData;
+                }
+            }
+
+            // Build result
+            const result = {
+                inputUrlOrTerm: item,
+                searchTerm,
+                geo: effectiveGeo || 'Worldwide',
+                timeRange: effectiveTime || 'today 12-m',
+                interestOverTime_timelineData: capturedData.interestOverTime || [],
+                interestOverTime_averages: [],
+                interestBySubregion,
+                interestByCity,
+                interestBy,
+                relatedTopics_top: topTopics,
+                relatedTopics_rising: risingTopics,
+                relatedQueries_top: topQueries,
+                relatedQueries_rising: risingQueries
+            };
+
+            await Actor.pushData(result);
+            successCount++;
+            log.info(`✓ Saved "${searchTerm}" - ${result.interestOverTime_timelineData.length} timeline points`);
+
+        } catch (error) {
+            log.error(`Failed to process "${searchTerm}": ${error.message}`);
+        }
+
+        // Delay between requests
+        if (i < processLimit - 1) {
+            log.info('Waiting before next request...');
+            await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+    }
+
+    log.info('═══════════════════════════════════════════');
+    log.info(`    Completed: ${successCount}/${processLimit} items`);
+    log.info('═══════════════════════════════════════════');
+
+    await Actor.exit();
 }
 
-main()
-    .catch(err => {
-        console.error('Fatal error:', err);
-        process.exit(1);
-    })
-    .finally(async () => {
-        await Actor.exit();
-    });
+main().catch(err => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+});
