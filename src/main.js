@@ -1,8 +1,8 @@
-// Google Trends Scraper - Using Camoufox for stealth browsing
-// Intercepts API responses directly from the browser
+// Google Trends Scraper - Session Warm-up Strategy
+// First visits Google to establish session, then navigates to Trends
 import { Actor, log } from 'apify';
 import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
-import { PlaywrightCrawler } from 'crawlee';
+import { sleep } from 'crawlee';
 import { firefox } from 'playwright';
 
 await Actor.init();
@@ -57,20 +57,22 @@ function buildExploreUrl(searchTerm, geo, timeRange, category) {
 function parseGoogleTrendsUrl(urlString) {
     try {
         const url = new URL(urlString);
-        const q = url.searchParams.get('q') || '';
-        const geo = url.searchParams.get('geo') || '';
-        const date = url.searchParams.get('date') || 'today 12-m';
-        const cat = url.searchParams.get('cat') || '0';
-
         return {
-            searchTerm: q,
-            geo,
-            timeRange: date,
-            category: parseInt(cat, 10)
+            searchTerm: url.searchParams.get('q') || '',
+            geo: url.searchParams.get('geo') || '',
+            timeRange: url.searchParams.get('date') || 'today 12-m',
+            category: parseInt(url.searchParams.get('cat') || '0', 10)
         };
     } catch (error) {
         return null;
     }
+}
+
+/**
+ * Random delay for human-like behavior
+ */
+function randomDelay(min = 2000, max = 5000) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
 /**
@@ -92,245 +94,247 @@ async function main() {
     } = input;
 
     log.info('═══════════════════════════════════════════');
-    log.info('    Google Trends Scraper - Starting');
+    log.info('    Google Trends Scraper');
+    log.info('    Session Warm-up Strategy');
     log.info('═══════════════════════════════════════════');
-    log.info(`Search terms: ${searchTerms.length}, Start URLs: ${startUrls.length}`);
-    log.info(`Geo: ${geo || 'Worldwide'}, Time range: ${timeRange || 'today 12-m'}`);
 
-    // Build list of items to process
+    // Build items list
     const itemsToProcess = [];
-
-    // Add search terms
     for (const term of searchTerms) {
         if (isMultiple && term.includes(',')) {
-            const splitTerms = term.split(',').map(t => t.trim()).filter(t => t);
-            itemsToProcess.push(...splitTerms);
+            itemsToProcess.push(...term.split(',').map(t => t.trim()).filter(t => t));
         } else {
             itemsToProcess.push(term);
         }
     }
-
-    // Add start URLs
     for (const urlObj of startUrls) {
         const url = typeof urlObj === 'string' ? urlObj : urlObj.url;
-        if (url) {
-            itemsToProcess.push(url);
-        }
+        if (url) itemsToProcess.push(url);
     }
 
     if (itemsToProcess.length === 0) {
-        log.error('No search terms or URLs provided. Please add searchTerms or startUrls in input.');
+        log.error('No search terms or URLs provided.');
         await Actor.exit();
         return;
     }
 
-    // Apply maxItems limit
     const effectiveTimeRange = customTimeRange || timeRange;
     const processLimit = maxItems > 0 ? Math.min(maxItems, itemsToProcess.length) : itemsToProcess.length;
 
-    log.info(`Processing ${processLimit} item(s) using Camoufox...`);
+    log.info(`Processing ${processLimit} item(s)...`);
 
-    // Setup proxy configuration
+    // Setup proxy
     const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
     const proxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
+    log.info(proxyUrl ? '✓ Proxy configured' : '⚠ No proxy');
 
-    log.info(proxyUrl ? 'Using Apify Proxy with Camoufox' : 'No proxy configured');
-
-    // Process each search term
     let successCount = 0;
 
-    for (let i = 0; i < processLimit; i++) {
-        const item = itemsToProcess[i];
+    // Launch browser once and reuse for all requests
+    log.info('Launching Camoufox browser...');
 
-        // Determine search term and URL
-        let searchTerm = item;
-        let exploreUrl;
-        let effectiveGeo = geo;
-        let effectiveCat = category;
-        let effectiveTime = effectiveTimeRange;
-
-        if (item.startsWith('http')) {
-            const parsed = parseGoogleTrendsUrl(item);
-            if (parsed) {
-                searchTerm = parsed.searchTerm;
-                effectiveGeo = parsed.geo || geo;
-                effectiveTime = parsed.timeRange || effectiveTimeRange;
-                effectiveCat = parsed.category || category;
-            }
-            exploreUrl = item;
-        } else {
-            exploreUrl = buildExploreUrl(item, effectiveGeo, effectiveTime, effectiveCat);
+    const launchOpts = await camoufoxLaunchOptions({
+        headless: true,
+        proxy: proxyUrl,
+        geoip: true,
+        humanize: true,
+        screen: {
+            minWidth: 1366,
+            maxWidth: 1920,
+            minHeight: 768,
+            maxHeight: 1080
         }
+    });
 
-        if (!searchTerm) {
-            log.warning(`Skipping invalid item: ${item}`);
-            continue;
-        }
+    const browser = await firefox.launch(launchOpts);
+    log.info('✓ Browser launched');
 
-        log.info(`━━━ Processing (${i + 1}/${processLimit}): "${searchTerm}" ━━━`);
-        log.info(`URL: ${exploreUrl}`);
+    try {
+        // Create a persistent context
+        const context = await browser.newContext({
+            viewport: { width: 1536, height: 864 },
+            locale: 'en-US',
+            timezoneId: 'America/New_York',
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0'
+        });
 
-        // Captured API responses
-        const capturedData = {
-            interestOverTime: null,
-            geoData: null,
-            relatedTopics: null,
-            relatedQueries: null
-        };
+        const page = await context.newPage();
 
+        // STEP 1: Warm up session by visiting Google first
+        log.info('Step 1: Warming up session...');
         try {
-            // Get fresh proxy URL for each request
-            const currentProxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
+            await page.goto('https://www.google.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await sleep(randomDelay(3000, 5000));
 
-            const crawler = new PlaywrightCrawler({
-                maxRequestRetries,
-                requestHandlerTimeoutSecs: 180,
-                navigationTimeoutSecs: 90,
-
-                launchContext: {
-                    launcher: firefox,
-                    launchOptions: await camoufoxLaunchOptions({
-                        headless: true,
-                        proxy: currentProxyUrl,
-                        geoip: true,
-                    }),
-                },
-
-                preNavigationHooks: [
-                    async ({ page }) => {
-                        // Block unnecessary resources for faster loading
-                        await page.route('**/*', async (route) => {
-                            const resourceType = route.request().resourceType();
-                            if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-                                await route.abort();
-                                return;
-                            }
-                            await route.continue();
-                        });
-
-                        // Intercept API responses
-                        page.on('response', async (response) => {
-                            const url = response.url();
-
-                            try {
-                                if (url.includes('/api/widgetdata/multiline')) {
-                                    const text = await response.text();
-                                    const data = parseApiResponse(text);
-                                    capturedData.interestOverTime = data.default?.timelineData || [];
-                                    log.info(`✓ Captured interest over time: ${capturedData.interestOverTime.length} points`);
-                                }
-
-                                if (url.includes('/api/widgetdata/comparedgeo')) {
-                                    const text = await response.text();
-                                    const data = parseApiResponse(text);
-                                    capturedData.geoData = data.default?.geoMapData || [];
-                                    log.info(`✓ Captured geo data: ${capturedData.geoData.length} regions`);
-                                }
-
-                                if (url.includes('/api/widgetdata/relatedsearches')) {
-                                    const text = await response.text();
-                                    const data = parseApiResponse(text);
-                                    const rankedList = data.default?.rankedList || [];
-
-                                    // Determine if topics or queries based on request
-                                    if (!capturedData.relatedTopics) {
-                                        capturedData.relatedTopics = rankedList;
-                                        log.info(`✓ Captured related topics`);
-                                    } else if (!capturedData.relatedQueries) {
-                                        capturedData.relatedQueries = rankedList;
-                                        log.info(`✓ Captured related queries`);
-                                    }
-                                }
-                            } catch (e) {
-                                // Ignore parse errors for non-JSON responses
-                            }
-                        });
-                    }
-                ],
-
-                requestHandler: async ({ page }) => {
-                    log.info('Page loaded, waiting for data...');
-
-                    // Wait for network to be idle
-                    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
-
-                    // Additional wait for dynamic content
-                    await page.waitForTimeout(5000);
-
-                    // Try to wait for chart elements
-                    try {
-                        await page.waitForSelector('[class*="line-chart"], .fe-atoms-generic-title, [class*="interest"]', {
-                            timeout: 15000
-                        });
-                    } catch (e) {
-                        log.debug('Chart elements not found, continuing...');
-                    }
-
-                    // Wait for remaining API calls
-                    await page.waitForTimeout(3000);
-
-                    log.info('Data capture complete');
+            // Accept cookies if prompt appears
+            try {
+                const acceptBtn = await page.$('button:has-text("Accept"), button:has-text("I agree"), [aria-label*="Accept"]');
+                if (acceptBtn) {
+                    await acceptBtn.click();
+                    await sleep(1000);
                 }
-            });
+            } catch (e) { }
 
-            await crawler.run([{ url: exploreUrl }]);
+            log.info('✓ Google session established');
+        } catch (e) {
+            log.warning(`Session warm-up had issues: ${e.message}`);
+        }
 
-            // Process captured data
-            let topTopics = [];
-            let risingTopics = [];
-            let topQueries = [];
-            let risingQueries = [];
+        // STEP 2: Visit Trends homepage first
+        log.info('Step 2: Visiting Trends homepage...');
+        try {
+            await page.goto('https://trends.google.com/trending?geo=US', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await sleep(randomDelay(3000, 6000));
 
-            // Process related topics
+            // Scroll a bit
+            await page.evaluate(() => window.scrollBy(0, 300));
+            await sleep(randomDelay(1000, 2000));
+
+            log.info('✓ Trends homepage loaded');
+        } catch (e) {
+            log.warning(`Trends homepage had issues: ${e.message}`);
+        }
+
+        // Process each search term
+        for (let i = 0; i < processLimit; i++) {
+            const item = itemsToProcess[i];
+
+            let searchTerm = item;
+            let exploreUrl;
+            let effectiveGeo = geo;
+            let effectiveCat = category;
+            let effectiveTime = effectiveTimeRange;
+
+            if (item.startsWith('http')) {
+                const parsed = parseGoogleTrendsUrl(item);
+                if (parsed) {
+                    searchTerm = parsed.searchTerm;
+                    effectiveGeo = parsed.geo || geo;
+                    effectiveTime = parsed.timeRange || effectiveTimeRange;
+                    effectiveCat = parsed.category || category;
+                }
+                exploreUrl = item;
+            } else {
+                exploreUrl = buildExploreUrl(item, effectiveGeo, effectiveTime, effectiveCat);
+            }
+
+            if (!searchTerm) {
+                log.warning(`Skipping invalid item: ${item}`);
+                continue;
+            }
+
+            log.info(`━━━ (${i + 1}/${processLimit}) "${searchTerm}" ━━━`);
+
+            // Captured API data
+            const capturedData = {
+                interestOverTime: null,
+                geoData: null,
+                relatedTopics: null,
+                relatedQueries: null
+            };
+
+            // Listen for API responses
+            const responseHandler = async (response) => {
+                const url = response.url();
+                try {
+                    if (url.includes('/api/widgetdata/multiline')) {
+                        const text = await response.text();
+                        capturedData.interestOverTime = parseApiResponse(text).default?.timelineData || [];
+                        log.info(`  ✓ Interest over time: ${capturedData.interestOverTime.length} points`);
+                    }
+                    if (url.includes('/api/widgetdata/comparedgeo')) {
+                        const text = await response.text();
+                        capturedData.geoData = parseApiResponse(text).default?.geoMapData || [];
+                        log.info(`  ✓ Geographic data: ${capturedData.geoData.length} regions`);
+                    }
+                    if (url.includes('/api/widgetdata/relatedsearches')) {
+                        const text = await response.text();
+                        const rankedList = parseApiResponse(text).default?.rankedList || [];
+                        if (!capturedData.relatedTopics) {
+                            capturedData.relatedTopics = rankedList;
+                            log.info(`  ✓ Related topics captured`);
+                        } else if (!capturedData.relatedQueries) {
+                            capturedData.relatedQueries = rankedList;
+                            log.info(`  ✓ Related queries captured`);
+                        }
+                    }
+                } catch (e) { }
+            };
+
+            page.on('response', responseHandler);
+
+            try {
+                // Navigate to explore page
+                log.info(`  Navigating to explore page...`);
+                await page.goto(exploreUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+                // Wait for page to load
+                await sleep(randomDelay(4000, 6000));
+
+                // Wait for network to settle
+                await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+
+                // Check for blocking
+                const content = await page.content();
+                if (content.includes('unusual traffic') || content.includes('captcha') || content.includes('429')) {
+                    throw new Error('Rate limited by Google');
+                }
+
+                // Simulate user interaction
+                await page.evaluate(() => window.scrollBy(0, 400));
+                await sleep(randomDelay(2000, 3000));
+
+                // Wait for charts
+                try {
+                    await page.waitForSelector('.fe-line-chart, [class*="trends"]', { timeout: 15000 });
+                } catch (e) { }
+
+                // Final wait for API calls
+                await sleep(randomDelay(3000, 5000));
+
+                log.info('  ✓ Page loaded');
+
+            } catch (error) {
+                log.error(`  ✗ Navigation failed: ${error.message}`);
+                page.off('response', responseHandler);
+
+                // Wait longer before retry
+                if (i < processLimit - 1) {
+                    log.info('  Waiting 30s before next attempt...');
+                    await sleep(30000);
+                }
+                continue;
+            }
+
+            page.off('response', responseHandler);
+
+            // Process results
+            let topTopics = [], risingTopics = [], topQueries = [], risingQueries = [];
+
             if (capturedData.relatedTopics) {
                 for (const list of capturedData.relatedTopics) {
                     if (list.rankedKeyword) {
-                        const items = list.rankedKeyword;
-                        const isRising = items.some(item =>
-                            item.formattedValue?.includes('%') ||
-                            item.formattedValue?.toLowerCase() === 'breakout'
+                        const isRising = list.rankedKeyword.some(item =>
+                            item.formattedValue?.includes('%') || item.formattedValue?.toLowerCase() === 'breakout'
                         );
-                        if (isRising) {
-                            risingTopics = items;
-                        } else {
-                            topTopics = items;
-                        }
+                        if (isRising) risingTopics = list.rankedKeyword;
+                        else topTopics = list.rankedKeyword;
                     }
                 }
             }
 
-            // Process related queries  
             if (capturedData.relatedQueries) {
                 for (const list of capturedData.relatedQueries) {
                     if (list.rankedKeyword) {
-                        const items = list.rankedKeyword;
-                        const isRising = items.some(item =>
-                            item.formattedValue?.includes('%') ||
-                            item.formattedValue?.toLowerCase() === 'breakout'
+                        const isRising = list.rankedKeyword.some(item =>
+                            item.formattedValue?.includes('%') || item.formattedValue?.toLowerCase() === 'breakout'
                         );
-                        if (isRising) {
-                            risingQueries = items;
-                        } else {
-                            topQueries = items;
-                        }
+                        if (isRising) risingQueries = list.rankedKeyword;
+                        else topQueries = list.rankedKeyword;
                     }
                 }
             }
 
-            // Determine geo data type
-            let interestBySubregion = [];
-            let interestByCity = [];
-            let interestBy = [];
-
-            if (capturedData.geoData && capturedData.geoData.length > 0) {
-                if (effectiveGeo) {
-                    interestBySubregion = capturedData.geoData;
-                } else {
-                    interestBy = capturedData.geoData;
-                }
-            }
-
-            // Build result
             const result = {
                 inputUrlOrTerm: item,
                 searchTerm,
@@ -338,38 +342,47 @@ async function main() {
                 timeRange: effectiveTime || 'today 12-m',
                 interestOverTime_timelineData: capturedData.interestOverTime || [],
                 interestOverTime_averages: [],
-                interestBySubregion,
-                interestByCity,
-                interestBy,
+                interestBySubregion: effectiveGeo ? (capturedData.geoData || []) : [],
+                interestByCity: [],
+                interestBy: effectiveGeo ? [] : (capturedData.geoData || []),
                 relatedTopics_top: topTopics,
                 relatedTopics_rising: risingTopics,
                 relatedQueries_top: topQueries,
                 relatedQueries_rising: risingQueries
             };
 
-            await Actor.pushData(result);
-            successCount++;
-            log.info(`✓ Saved "${searchTerm}" - ${result.interestOverTime_timelineData.length} timeline points`);
+            // Only save if we got data
+            if (result.interestOverTime_timelineData.length > 0 ||
+                result.relatedTopics_top.length > 0 ||
+                result.relatedQueries_top.length > 0) {
+                await Actor.pushData(result);
+                successCount++;
+                log.info(`✓ SAVED: "${searchTerm}" (${result.interestOverTime_timelineData.length} timeline pts)`);
+            } else {
+                log.warning(`  No data captured for "${searchTerm}"`);
+            }
 
-        } catch (error) {
-            log.error(`Failed to process "${searchTerm}": ${error.message}`);
+            // Delay between terms
+            if (i < processLimit - 1) {
+                const delay = randomDelay(10000, 20000);
+                log.info(`Waiting ${Math.round(delay / 1000)}s before next term...`);
+                await sleep(delay);
+            }
         }
 
-        // Delay between requests
-        if (i < processLimit - 1) {
-            log.info('Waiting before next request...');
-            await new Promise(resolve => setTimeout(resolve, 3000));
-        }
+        await context.close();
+    } finally {
+        await browser.close();
     }
 
     log.info('═══════════════════════════════════════════');
-    log.info(`    Completed: ${successCount}/${processLimit} items`);
+    log.info(`    Results: ${successCount}/${processLimit} successful`);
     log.info('═══════════════════════════════════════════');
 
     await Actor.exit();
 }
 
 main().catch(err => {
-    console.error('Fatal error:', err);
+    log.error('Fatal error:', err);
     process.exit(1);
 });

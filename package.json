@@ -27,6 +27,6 @@
     "test": "echo \"Error: oops, the Actor has no tests yet, sad!\" && exit 1",
     "postinstall": "npx camoufox-js fetch"
   },
-  "author": "It's not you it's me",
+  "author": "Shahid",
   "license": "ISC"
 }
