@@ -7,7 +7,7 @@
     "searchTerms": {
       "title": "Search terms",
       "type": "array",
-      "description": "List of search terms to scrape from Google Trends. Each term will be processed separately.",
+      "description": "List of search terms to scrape from Google Trends.",
       "editor": "stringList",
       "prefill": [
         "web scraping"
@@ -20,16 +20,15 @@
     "startUrls": {
       "title": "Google Trends URLs",
       "type": "array",
-      "description": "Direct Google Trends explore URLs with pre-applied filters. If provided, parameters from URLs take precedence.",
+      "description": "Direct Google Trends explore URLs with pre-applied filters.",
       "editor": "requestListSources"
     },
     "geo": {
       "title": "Geographic region",
       "type": "string",
-      "description": "Two-letter country code (e.g., US, GB, DE) or leave empty for worldwide data.",
+      "description": "Two-letter country code (e.g., US, GB, DE) or leave empty for worldwide.",
       "editor": "textfield",
-      "default": "",
-      "example": "US"
+      "default": ""
     },
     "timeRange": {
       "title": "Time range",
@@ -65,45 +64,47 @@
     "customTimeRange": {
       "title": "Custom time range",
       "type": "string",
-      "description": "Custom date range in format 'YYYY-MM-DD YYYY-MM-DD'. Takes precedence over timeRange if provided.",
-      "editor": "textfield",
-      "example": "2023-01-01 2024-01-01"
+      "description": "Custom date range: YYYY-MM-DD YYYY-MM-DD",
+      "editor": "textfield"
     },
     "category": {
       "title": "Category",
       "type": "integer",
-      "description": "Google Trends category ID. Use 0 for all categories.",
+      "description": "Google Trends category ID. Use 0 for all.",
       "editor": "number",
       "default": 0
+    },
+    "cookies": {
+      "title": "Session Cookies (JSON)",
+      "type": "string",
+      "description": "Pre-authenticated cookies from trends.google.com to bypass CAPTCHA. Export cookies using browser extension like 'Cookie-Editor' and paste the JSON array here.",
+      "editor": "textarea",
+      "example": "[{\"name\":\"NID\",\"value\":\"xxx\",\"domain\":\".google.com\"},{\"name\":\"1P_JAR\",\"value\":\"xxx\",\"domain\":\".google.com\"}]"
     },
     "isMultiple": {
       "title": "Multiple terms (comma-separated)",
       "type": "boolean",
-      "description": "If checked, commas in search terms will be treated as multiple separate terms.",
+      "description": "Treat commas in search terms as separate terms.",
       "editor": "checkbox",
       "default": false
     },
     "maxItems": {
       "title": "Max items",
       "type": "integer",
-      "description": "Maximum number of search terms to process. 0 means no limit.",
+      "description": "Maximum terms to process. 0 = no limit.",
       "editor": "number",
       "default": 0
-    },
-    "maxRequestRetries": {
-      "title": "Max request retries",
-      "type": "integer",
-      "description": "Number of retry attempts for failed requests.",
-      "editor": "number",
-      "default": 5
     },
     "proxyConfiguration": {
       "title": "Proxy configuration",
       "type": "object",
-      "description": "Proxy settings for the requests.",
+      "description": "Use RESIDENTIAL proxy for best results.",
       "editor": "proxy",
       "default": {
-        "useApifyProxy": true
+        "useApifyProxy": true,
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
       }
     }
   },

@@ -1,9 +1,13 @@
-// Google Trends Scraper - Proper Session Context Strategy
-// Uses browser session to access internal APIs that require authentication
+// Google Trends Scraper - CSV Download Approach
+// Uses the download/export button to get data (like the Python selenium scraper)
 import { Actor, log } from 'apify';
 import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
 import { sleep } from 'crawlee';
 import { firefox } from 'playwright';
+import { readFile, unlink } from 'fs/promises';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { mkdtempSync, existsSync } from 'fs';
 
 await Actor.init();
 
@@ -14,13 +18,6 @@ const TIME_RANGES = {
     'now 7-d': 'now 7-d', 'today 1-m': 'today 1-m', 'today 3-m': 'today 3-m',
     'today 12-m': 'today 12-m', 'today 5-y': 'today 5-y', 'all': 'all', '': 'today 12-m'
 };
-
-function parseApiResponse(body) {
-    let cleanBody = body;
-    if (cleanBody.startsWith(")]}'")) cleanBody = cleanBody.slice(4);
-    if (cleanBody.startsWith("\n")) cleanBody = cleanBody.slice(1);
-    return JSON.parse(cleanBody);
-}
 
 function buildExploreUrl(searchTerm, geo, timeRange, category) {
     const url = new URL(`${GOOGLE_TRENDS_URL}/trends/explore`);
@@ -48,17 +45,90 @@ function randomDelay(min = 2000, max = 5000) {
     return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+/**
+ * Parse CSV data to get timeline data
+ */
+function parseTimelineCsv(csvContent, keyword) {
+    const lines = csvContent.trim().split('\n');
+    if (lines.length < 3) return [];
+
+    // Skip header rows (first 2-3 rows are usually headers)
+    const dataStartIndex = lines.findIndex(line =>
+        line.match(/^\d{4}-\d{2}-\d{2}/) || line.match(/^\w+ \d+,? \d{4}/)
+    );
+
+    if (dataStartIndex === -1) return [];
+
+    const timelineData = [];
+    for (let i = dataStartIndex; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        const parts = line.split(',');
+        if (parts.length >= 2) {
+            const dateStr = parts[0].trim();
+            let value = parts[1].trim();
+
+            // Handle '<1' values
+            if (value === '<1') value = '0';
+
+            const numValue = parseInt(value, 10);
+            if (!isNaN(numValue)) {
+                timelineData.push({
+                    time: dateStr,
+                    formattedTime: dateStr,
+                    value: [numValue],
+                    formattedValue: [String(numValue)],
+                    hasData: [numValue > 0]
+                });
+            }
+        }
+    }
+
+    return timelineData;
+}
+
+/**
+ * Parse cookies from JSON input
+ */
+function parseCookies(cookieInput) {
+    if (!cookieInput) return [];
+    try {
+        const parsed = JSON.parse(cookieInput);
+        if (Array.isArray(parsed)) {
+            return parsed.map(c => ({
+                name: c.name,
+                value: c.value,
+                domain: c.domain || '.google.com',
+                path: c.path || '/',
+                expires: c.expirationDate || c.expires || -1,
+                httpOnly: c.httpOnly || false,
+                secure: c.secure !== false,
+                sameSite: c.sameSite || 'Lax'
+            }));
+        }
+    } catch (e) {
+        log.warning(`Cookie parse error: ${e.message}`);
+    }
+    return [];
+}
+
 async function main() {
     const input = (await Actor.getInput()) || {};
     const {
         searchTerms = [], startUrls = [], geo = '', timeRange = '',
         customTimeRange = '', category = 0, isMultiple = false,
-        maxItems = 0, proxyConfiguration
+        maxItems = 0, proxyConfiguration, cookies = ''
     } = input;
 
     log.info('═══════════════════════════════════════════');
     log.info('    Google Trends Scraper');
+    log.info('    CSV Download Method');
     log.info('═══════════════════════════════════════════');
+
+    // Parse cookies
+    const sessionCookies = parseCookies(cookies);
+    log.info(sessionCookies.length > 0 ? `✓ ${sessionCookies.length} cookies loaded` : '⚠ No cookies');
 
     // Build items list
     const itemsToProcess = [];
@@ -75,7 +145,7 @@ async function main() {
     }
 
     if (itemsToProcess.length === 0) {
-        log.error('No search terms or URLs provided.');
+        log.error('No search terms provided.');
         await Actor.exit();
         return;
     }
@@ -84,15 +154,19 @@ async function main() {
     const processLimit = maxItems > 0 ? Math.min(maxItems, itemsToProcess.length) : itemsToProcess.length;
     log.info(`Processing ${processLimit} item(s)...`);
 
-    // Setup proxy - use RESIDENTIAL for best results
+    // Setup proxy
     const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
     const proxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
-    log.info(proxyUrl ? '✓ Proxy configured' : '⚠ No proxy - likely to be blocked');
+    log.info(proxyUrl ? '✓ Proxy configured' : '⚠ No proxy');
+
+    // Create temp download directory
+    const downloadPath = mkdtempSync(join(tmpdir(), 'gtrends-'));
+    log.info(`Download path: ${downloadPath}`);
 
     let successCount = 0;
 
-    // Launch Camoufox browser
-    log.info('Launching stealth browser...');
+    // Launch browser
+    log.info('Launching browser...');
     const launchOpts = await camoufoxLaunchOptions({
         headless: true,
         proxy: proxyUrl,
@@ -106,49 +180,42 @@ async function main() {
         const context = await browser.newContext({
             viewport: { width: 1536, height: 864 },
             locale: 'en-US',
-            timezoneId: 'America/New_York'
+            timezoneId: 'America/New_York',
+            acceptDownloads: true
         });
+
+        // Inject cookies if available
+        if (sessionCookies.length > 0) {
+            await context.addCookies(sessionCookies);
+            log.info('✓ Cookies injected');
+        }
 
         const page = await context.newPage();
 
-        // Block unnecessary resources
-        await page.route('**/*', async (route) => {
-            const type = route.request().resourceType();
-            const url = route.request().url();
-            if (['image', 'stylesheet', 'font', 'media'].includes(type) ||
-                url.includes('google-analytics') || url.includes('doubleclick')) {
-                return route.abort();
-            }
-            return route.continue();
-        });
-
-        // STEP 1: Establish session by visiting Trends homepage
-        log.info('Step 1: Establishing session...');
+        // Warm up session
+        log.info('Warming up session...');
         try {
-            await page.goto(`${GOOGLE_TRENDS_URL}/trending?geo=US&hl=en-US`, {
+            await page.goto(`${GOOGLE_TRENDS_URL}/trending?geo=US`, {
                 waitUntil: 'domcontentloaded',
                 timeout: 60000
             });
-            await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
             await sleep(randomDelay(3000, 5000));
 
-            // Check if we have access
             const content = await page.content();
-            if (content.includes('trending') || content.includes('Trending')) {
-                log.info('✓ Session established - Trends accessible');
-            } else if (content.includes('429') || content.includes('unusual')) {
-                log.error('✗ Blocked on session establishment');
-                throw new Error('Blocked by Google');
+            if (content.includes('captcha') || content.includes('unusual')) {
+                log.warning('⚠ CAPTCHA detected on warmup - will try anyway');
+            } else {
+                log.info('✓ Session ready');
             }
         } catch (e) {
-            log.warning(`Session setup issue: ${e.message}`);
+            log.warning(`Warmup: ${e.message}`);
         }
 
-        // Simulate human interaction
-        await page.evaluate(() => window.scrollBy(0, 300));
-        await sleep(randomDelay(2000, 4000));
+        // Human behavior
+        await page.evaluate(() => window.scrollBy(0, 200));
+        await sleep(randomDelay(1000, 2000));
 
-        // Process each search term
+        // Process each term
         for (let i = 0; i < processLimit; i++) {
             const item = itemsToProcess[i];
 
@@ -175,86 +242,96 @@ async function main() {
 
             log.info(`━━━ (${i + 1}/${processLimit}) "${searchTerm}" ━━━`);
 
-            // Data collectors
-            const capturedData = {
-                interestOverTime: null,
-                geoData: null,
-                relatedTopics: null,
-                relatedQueries: null
-            };
-
-            // Set up response interceptor
-            const responseHandler = async (response) => {
-                const url = response.url();
-                if (response.status() !== 200) return;
-
-                try {
-                    const text = await response.text();
-                    if (url.includes('/widgetdata/multiline')) {
-                        capturedData.interestOverTime = parseApiResponse(text).default?.timelineData || [];
-                        log.info(`  ✓ Timeline: ${capturedData.interestOverTime.length} pts`);
-                    }
-                    if (url.includes('/widgetdata/comparedgeo')) {
-                        capturedData.geoData = parseApiResponse(text).default?.geoMapData || [];
-                        log.info(`  ✓ Geo: ${capturedData.geoData.length} regions`);
-                    }
-                    if (url.includes('/widgetdata/relatedsearches')) {
-                        const data = parseApiResponse(text).default?.rankedList || [];
-                        if (!capturedData.relatedTopics) {
-                            capturedData.relatedTopics = data;
-                            log.info(`  ✓ Topics captured`);
-                        } else {
-                            capturedData.relatedQueries = data;
-                            log.info(`  ✓ Queries captured`);
-                        }
-                    }
-                } catch { }
-            };
-
-            page.on('response', responseHandler);
+            let timelineData = [];
 
             try {
                 // Navigate to explore page
-                log.info(`  Loading explore page...`);
+                log.info('  Loading page...');
+                await page.goto(exploreUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                await sleep(randomDelay(3000, 5000));
 
-                const response = await page.goto(exploreUrl, {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 60000
-                });
-
-                if (response && response.status() === 429) {
-                    throw new Error('Rate limited (429)');
-                }
-
-                // Wait for content
-                await page.waitForLoadState('networkidle', { timeout: 45000 }).catch(() => { });
-                await sleep(randomDelay(4000, 6000));
-
-                // Human scroll
-                await page.evaluate(() => window.scrollBy(0, 500));
-                await sleep(randomDelay(2000, 3000));
-
-                // Check for block
-                const pageContent = await page.content();
-                if (pageContent.includes('unusual traffic') || pageContent.includes('captcha')) {
+                // Check for CAPTCHA
+                const content = await page.content();
+                if (content.includes('unusual traffic') || content.includes('captcha')) {
                     throw new Error('CAPTCHA detected');
                 }
 
-                // Wait for chart to appear
+                // Wait for chart widget (like Python: widget[type='fe_line_chart'])
+                log.info('  Waiting for chart...');
                 try {
-                    await page.waitForSelector('.fe-line-chart, [class*="chart"], [class*="explore"]', {
-                        timeout: 15000
+                    await page.waitForSelector('widget[type="fe_line_chart"], .fe-line-chart, [class*="line-chart"]', {
+                        timeout: 30000
                     });
-                } catch { }
+                    log.info('  ✓ Chart found');
+                } catch {
+                    log.warning('  Chart not found, trying anyway');
+                }
 
-                // Extra wait for all API calls
-                await sleep(randomDelay(3000, 5000));
+                await sleep(randomDelay(2000, 3000));
+
+                // Find and click the export/download button (like Python: .widget-actions-item.export)
+                log.info('  Looking for export button...');
+
+                const downloadButton = await page.$(
+                    'widget[type="fe_line_chart"] .widget-actions-item.export, ' +
+                    '.fe-line-chart-header button[aria-label*="download"], ' +
+                    '.fe-line-chart-header button[aria-label*="export"], ' +
+                    '.widget-actions-item.export, ' +
+                    'button[aria-label*="CSV"], ' +
+                    '[class*="export"], ' +
+                    '.line-chart-header button'
+                );
+
+                if (downloadButton) {
+                    log.info('  ✓ Export button found, clicking...');
+
+                    // Set up download handler
+                    const [download] = await Promise.all([
+                        page.waitForEvent('download', { timeout: 30000 }),
+                        downloadButton.click()
+                    ]);
+
+                    // Save the downloaded file
+                    const downloadFile = join(downloadPath, `${searchTerm.replace(/[^a-zA-Z0-9]/g, '_')}.csv`);
+                    await download.saveAs(downloadFile);
+                    log.info(`  ✓ Downloaded: ${download.suggestedFilename()}`);
+
+                    // Read and parse the CSV
+                    await sleep(1000);
+                    if (existsSync(downloadFile)) {
+                        const csvContent = await readFile(downloadFile, 'utf-8');
+                        timelineData = parseTimelineCsv(csvContent, searchTerm);
+                        log.info(`  ✓ Parsed ${timelineData.length} data points`);
+
+                        // Clean up
+                        await unlink(downloadFile).catch(() => { });
+                    }
+                } else {
+                    log.warning('  Export button not found - trying API interception fallback');
+
+                    // Fallback: try to capture from network
+                    const responses = [];
+                    page.on('response', async (response) => {
+                        if (response.url().includes('/widgetdata/multiline') && response.status() === 200) {
+                            try {
+                                const text = await response.text();
+                                let data = text;
+                                if (data.startsWith(")]}'")) data = data.slice(4);
+                                if (data.startsWith("\n")) data = data.slice(1);
+                                const parsed = JSON.parse(data);
+                                timelineData = parsed.default?.timelineData || [];
+                            } catch { }
+                        }
+                    });
+
+                    // Reload page to trigger API calls
+                    await page.reload({ waitUntil: 'networkidle', timeout: 45000 }).catch(() => { });
+                    await sleep(5000);
+                }
 
             } catch (error) {
                 log.error(`  ✗ Failed: ${error.message}`);
-                page.off('response', responseHandler);
 
-                // Long cooldown after error
                 if (i < processLimit - 1) {
                     log.info('  Waiting 60s cooldown...');
                     await sleep(60000);
@@ -262,62 +339,35 @@ async function main() {
                 continue;
             }
 
-            page.off('response', responseHandler);
-
-            // Process results
-            let topTopics = [], risingTopics = [], topQueries = [], risingQueries = [];
-
-            for (const list of (capturedData.relatedTopics || [])) {
-                if (list.rankedKeyword) {
-                    const isRising = list.rankedKeyword.some(i =>
-                        i.formattedValue?.includes('%') || i.formattedValue?.toLowerCase() === 'breakout'
-                    );
-                    if (isRising) risingTopics = list.rankedKeyword;
-                    else topTopics = list.rankedKeyword;
-                }
-            }
-
-            for (const list of (capturedData.relatedQueries || [])) {
-                if (list.rankedKeyword) {
-                    const isRising = list.rankedKeyword.some(i =>
-                        i.formattedValue?.includes('%') || i.formattedValue?.toLowerCase() === 'breakout'
-                    );
-                    if (isRising) risingQueries = list.rankedKeyword;
-                    else topQueries = list.rankedKeyword;
-                }
-            }
-
+            // Build result
             const result = {
                 inputUrlOrTerm: item,
                 searchTerm,
                 geo: effectiveGeo || 'Worldwide',
                 timeRange: effectiveTime || 'today 12-m',
-                interestOverTime_timelineData: capturedData.interestOverTime || [],
+                interestOverTime_timelineData: timelineData,
                 interestOverTime_averages: [],
-                interestBySubregion: effectiveGeo ? (capturedData.geoData || []) : [],
+                interestBySubregion: [],
                 interestByCity: [],
-                interestBy: effectiveGeo ? [] : (capturedData.geoData || []),
-                relatedTopics_top: topTopics,
-                relatedTopics_rising: risingTopics,
-                relatedQueries_top: topQueries,
-                relatedQueries_rising: risingQueries
+                interestBy: [],
+                relatedTopics_top: [],
+                relatedTopics_rising: [],
+                relatedQueries_top: [],
+                relatedQueries_rising: []
             };
 
-            const hasData = result.interestOverTime_timelineData.length > 0 ||
-                topTopics.length > 0 || topQueries.length > 0;
-
-            if (hasData) {
+            if (timelineData.length > 0) {
                 await Actor.pushData(result);
                 successCount++;
-                log.info(`✓ SAVED "${searchTerm}"`);
+                log.info(`✓ SAVED "${searchTerm}" (${timelineData.length} points)`);
             } else {
-                log.warning(`  No data captured for "${searchTerm}"`);
+                log.warning(`  No data for "${searchTerm}"`);
             }
 
-            // Delay between terms - longer to avoid rate limits
+            // Delay between terms
             if (i < processLimit - 1) {
-                const delay = randomDelay(15000, 30000);
-                log.info(`Cooling down ${Math.round(delay / 1000)}s...`);
+                const delay = randomDelay(10000, 20000);
+                log.info(`Waiting ${Math.round(delay / 1000)}s...`);
                 await sleep(delay);
             }
         }
