@@ -1,5 +1,5 @@
-// Google Trends Scraper - Session Warm-up Strategy
-// First visits Google to establish session, then navigates to Trends
+// Google Trends Scraper - Proper Session Context Strategy
+// Uses browser session to access internal APIs that require authentication
 import { Actor, log } from 'apify';
 import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
 import { sleep } from 'crawlee';
@@ -7,42 +7,23 @@ import { firefox } from 'playwright';
 
 await Actor.init();
 
-const GOOGLE_TRENDS_URL = 'https://trends.google.com/trends';
+const GOOGLE_TRENDS_URL = 'https://trends.google.com';
 
-// Time range mappings
 const TIME_RANGES = {
-    'now 1-H': 'now 1-H',
-    'now 4-H': 'now 4-H',
-    'now 1-d': 'now 1-d',
-    'now 7-d': 'now 7-d',
-    'today 1-m': 'today 1-m',
-    'today 3-m': 'today 3-m',
-    'today 12-m': 'today 12-m',
-    'today 5-y': 'today 5-y',
-    'all': 'all',
-    '': 'today 12-m'
+    'now 1-H': 'now 1-H', 'now 4-H': 'now 4-H', 'now 1-d': 'now 1-d',
+    'now 7-d': 'now 7-d', 'today 1-m': 'today 1-m', 'today 3-m': 'today 3-m',
+    'today 12-m': 'today 12-m', 'today 5-y': 'today 5-y', 'all': 'all', '': 'today 12-m'
 };
 
-/**
- * Strip the security prefix from Google Trends API responses
- */
 function parseApiResponse(body) {
     let cleanBody = body;
-    if (cleanBody.startsWith(")]}'\\n")) {
-        cleanBody = cleanBody.slice(5);
-    } else if (cleanBody.startsWith(")]}'")) {
-        cleanBody = cleanBody.slice(4);
-    } else if (cleanBody.startsWith(")]}'\n")) {
-        cleanBody = cleanBody.slice(5);
-    }
+    if (cleanBody.startsWith(")]}'")) cleanBody = cleanBody.slice(4);
+    if (cleanBody.startsWith("\n")) cleanBody = cleanBody.slice(1);
     return JSON.parse(cleanBody);
 }
 
-/**
- * Build Google Trends explore URL
- */
 function buildExploreUrl(searchTerm, geo, timeRange, category) {
-    const url = new URL(`${GOOGLE_TRENDS_URL}/explore`);
+    const url = new URL(`${GOOGLE_TRENDS_URL}/trends/explore`);
     url.searchParams.set('q', searchTerm);
     url.searchParams.set('hl', 'en-US');
     if (geo) url.searchParams.set('geo', geo);
@@ -51,9 +32,6 @@ function buildExploreUrl(searchTerm, geo, timeRange, category) {
     return url.href;
 }
 
-/**
- * Parse Google Trends URL to extract parameters
- */
 function parseGoogleTrendsUrl(urlString) {
     try {
         const url = new URL(urlString);
@@ -63,39 +41,23 @@ function parseGoogleTrendsUrl(urlString) {
             timeRange: url.searchParams.get('date') || 'today 12-m',
             category: parseInt(url.searchParams.get('cat') || '0', 10)
         };
-    } catch (error) {
-        return null;
-    }
+    } catch { return null; }
 }
 
-/**
- * Random delay for human-like behavior
- */
 function randomDelay(min = 2000, max = 5000) {
     return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-/**
- * Main execution
- */
 async function main() {
     const input = (await Actor.getInput()) || {};
     const {
-        searchTerms = [],
-        startUrls = [],
-        geo = '',
-        timeRange = '',
-        customTimeRange = '',
-        category = 0,
-        isMultiple = false,
-        maxItems = 0,
-        maxRequestRetries = 5,
-        proxyConfiguration
+        searchTerms = [], startUrls = [], geo = '', timeRange = '',
+        customTimeRange = '', category = 0, isMultiple = false,
+        maxItems = 0, proxyConfiguration
     } = input;
 
     log.info('═══════════════════════════════════════════');
     log.info('    Google Trends Scraper');
-    log.info('    Session Warm-up Strategy');
     log.info('═══════════════════════════════════════════');
 
     // Build items list
@@ -103,7 +65,7 @@ async function main() {
     for (const term of searchTerms) {
         if (isMultiple && term.includes(',')) {
             itemsToProcess.push(...term.split(',').map(t => t.trim()).filter(t => t));
-        } else {
+        } else if (term) {
             itemsToProcess.push(term);
         }
     }
@@ -120,80 +82,71 @@ async function main() {
 
     const effectiveTimeRange = customTimeRange || timeRange;
     const processLimit = maxItems > 0 ? Math.min(maxItems, itemsToProcess.length) : itemsToProcess.length;
-
     log.info(`Processing ${processLimit} item(s)...`);
 
-    // Setup proxy
+    // Setup proxy - use RESIDENTIAL for best results
     const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
     const proxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
-    log.info(proxyUrl ? '✓ Proxy configured' : '⚠ No proxy');
+    log.info(proxyUrl ? '✓ Proxy configured' : '⚠ No proxy - likely to be blocked');
 
     let successCount = 0;
 
-    // Launch browser once and reuse for all requests
-    log.info('Launching Camoufox browser...');
-
+    // Launch Camoufox browser
+    log.info('Launching stealth browser...');
     const launchOpts = await camoufoxLaunchOptions({
         headless: true,
         proxy: proxyUrl,
         geoip: true,
-        humanize: true,
-        screen: {
-            minWidth: 1366,
-            maxWidth: 1920,
-            minHeight: 768,
-            maxHeight: 1080
-        }
+        humanize: true
     });
 
     const browser = await firefox.launch(launchOpts);
-    log.info('✓ Browser launched');
 
     try {
-        // Create a persistent context
         const context = await browser.newContext({
             viewport: { width: 1536, height: 864 },
             locale: 'en-US',
-            timezoneId: 'America/New_York',
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0'
+            timezoneId: 'America/New_York'
         });
 
         const page = await context.newPage();
 
-        // STEP 1: Warm up session by visiting Google first
-        log.info('Step 1: Warming up session...');
+        // Block unnecessary resources
+        await page.route('**/*', async (route) => {
+            const type = route.request().resourceType();
+            const url = route.request().url();
+            if (['image', 'stylesheet', 'font', 'media'].includes(type) ||
+                url.includes('google-analytics') || url.includes('doubleclick')) {
+                return route.abort();
+            }
+            return route.continue();
+        });
+
+        // STEP 1: Establish session by visiting Trends homepage
+        log.info('Step 1: Establishing session...');
         try {
-            await page.goto('https://www.google.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await page.goto(`${GOOGLE_TRENDS_URL}/trending?geo=US&hl=en-US`, {
+                waitUntil: 'domcontentloaded',
+                timeout: 60000
+            });
+            await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
             await sleep(randomDelay(3000, 5000));
 
-            // Accept cookies if prompt appears
-            try {
-                const acceptBtn = await page.$('button:has-text("Accept"), button:has-text("I agree"), [aria-label*="Accept"]');
-                if (acceptBtn) {
-                    await acceptBtn.click();
-                    await sleep(1000);
-                }
-            } catch (e) { }
-
-            log.info('✓ Google session established');
+            // Check if we have access
+            const content = await page.content();
+            if (content.includes('trending') || content.includes('Trending')) {
+                log.info('✓ Session established - Trends accessible');
+            } else if (content.includes('429') || content.includes('unusual')) {
+                log.error('✗ Blocked on session establishment');
+                throw new Error('Blocked by Google');
+            }
         } catch (e) {
-            log.warning(`Session warm-up had issues: ${e.message}`);
+            log.warning(`Session setup issue: ${e.message}`);
         }
 
-        // STEP 2: Visit Trends homepage first
-        log.info('Step 2: Visiting Trends homepage...');
-        try {
-            await page.goto('https://trends.google.com/trending?geo=US', { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await sleep(randomDelay(3000, 6000));
-
-            // Scroll a bit
-            await page.evaluate(() => window.scrollBy(0, 300));
-            await sleep(randomDelay(1000, 2000));
-
-            log.info('✓ Trends homepage loaded');
-        } catch (e) {
-            log.warning(`Trends homepage had issues: ${e.message}`);
-        }
+        // Simulate human interaction
+        await page.evaluate(() => window.scrollBy(0, 300));
+        await sleep(randomDelay(2000, 4000));
 
         // Process each search term
         for (let i = 0; i < processLimit; i++) {
@@ -218,14 +171,11 @@ async function main() {
                 exploreUrl = buildExploreUrl(item, effectiveGeo, effectiveTime, effectiveCat);
             }
 
-            if (!searchTerm) {
-                log.warning(`Skipping invalid item: ${item}`);
-                continue;
-            }
+            if (!searchTerm) continue;
 
             log.info(`━━━ (${i + 1}/${processLimit}) "${searchTerm}" ━━━`);
 
-            // Captured API data
+            // Data collectors
             const capturedData = {
                 interestOverTime: null,
                 geoData: null,
@@ -233,75 +183,81 @@ async function main() {
                 relatedQueries: null
             };
 
-            // Listen for API responses
+            // Set up response interceptor
             const responseHandler = async (response) => {
                 const url = response.url();
+                if (response.status() !== 200) return;
+
                 try {
-                    if (url.includes('/api/widgetdata/multiline')) {
-                        const text = await response.text();
+                    const text = await response.text();
+                    if (url.includes('/widgetdata/multiline')) {
                         capturedData.interestOverTime = parseApiResponse(text).default?.timelineData || [];
-                        log.info(`  ✓ Interest over time: ${capturedData.interestOverTime.length} points`);
+                        log.info(`  ✓ Timeline: ${capturedData.interestOverTime.length} pts`);
                     }
-                    if (url.includes('/api/widgetdata/comparedgeo')) {
-                        const text = await response.text();
+                    if (url.includes('/widgetdata/comparedgeo')) {
                         capturedData.geoData = parseApiResponse(text).default?.geoMapData || [];
-                        log.info(`  ✓ Geographic data: ${capturedData.geoData.length} regions`);
+                        log.info(`  ✓ Geo: ${capturedData.geoData.length} regions`);
                     }
-                    if (url.includes('/api/widgetdata/relatedsearches')) {
-                        const text = await response.text();
-                        const rankedList = parseApiResponse(text).default?.rankedList || [];
+                    if (url.includes('/widgetdata/relatedsearches')) {
+                        const data = parseApiResponse(text).default?.rankedList || [];
                         if (!capturedData.relatedTopics) {
-                            capturedData.relatedTopics = rankedList;
-                            log.info(`  ✓ Related topics captured`);
-                        } else if (!capturedData.relatedQueries) {
-                            capturedData.relatedQueries = rankedList;
-                            log.info(`  ✓ Related queries captured`);
+                            capturedData.relatedTopics = data;
+                            log.info(`  ✓ Topics captured`);
+                        } else {
+                            capturedData.relatedQueries = data;
+                            log.info(`  ✓ Queries captured`);
                         }
                     }
-                } catch (e) { }
+                } catch { }
             };
 
             page.on('response', responseHandler);
 
             try {
                 // Navigate to explore page
-                log.info(`  Navigating to explore page...`);
-                await page.goto(exploreUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                log.info(`  Loading explore page...`);
 
-                // Wait for page to load
-                await sleep(randomDelay(4000, 6000));
+                const response = await page.goto(exploreUrl, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 60000
+                });
 
-                // Wait for network to settle
-                await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
-
-                // Check for blocking
-                const content = await page.content();
-                if (content.includes('unusual traffic') || content.includes('captcha') || content.includes('429')) {
-                    throw new Error('Rate limited by Google');
+                if (response && response.status() === 429) {
+                    throw new Error('Rate limited (429)');
                 }
 
-                // Simulate user interaction
-                await page.evaluate(() => window.scrollBy(0, 400));
+                // Wait for content
+                await page.waitForLoadState('networkidle', { timeout: 45000 }).catch(() => { });
+                await sleep(randomDelay(4000, 6000));
+
+                // Human scroll
+                await page.evaluate(() => window.scrollBy(0, 500));
                 await sleep(randomDelay(2000, 3000));
 
-                // Wait for charts
-                try {
-                    await page.waitForSelector('.fe-line-chart, [class*="trends"]', { timeout: 15000 });
-                } catch (e) { }
+                // Check for block
+                const pageContent = await page.content();
+                if (pageContent.includes('unusual traffic') || pageContent.includes('captcha')) {
+                    throw new Error('CAPTCHA detected');
+                }
 
-                // Final wait for API calls
+                // Wait for chart to appear
+                try {
+                    await page.waitForSelector('.fe-line-chart, [class*="chart"], [class*="explore"]', {
+                        timeout: 15000
+                    });
+                } catch { }
+
+                // Extra wait for all API calls
                 await sleep(randomDelay(3000, 5000));
 
-                log.info('  ✓ Page loaded');
-
             } catch (error) {
-                log.error(`  ✗ Navigation failed: ${error.message}`);
+                log.error(`  ✗ Failed: ${error.message}`);
                 page.off('response', responseHandler);
 
-                // Wait longer before retry
+                // Long cooldown after error
                 if (i < processLimit - 1) {
-                    log.info('  Waiting 30s before next attempt...');
-                    await sleep(30000);
+                    log.info('  Waiting 60s cooldown...');
+                    await sleep(60000);
                 }
                 continue;
             }
@@ -311,27 +267,23 @@ async function main() {
             // Process results
             let topTopics = [], risingTopics = [], topQueries = [], risingQueries = [];
 
-            if (capturedData.relatedTopics) {
-                for (const list of capturedData.relatedTopics) {
-                    if (list.rankedKeyword) {
-                        const isRising = list.rankedKeyword.some(item =>
-                            item.formattedValue?.includes('%') || item.formattedValue?.toLowerCase() === 'breakout'
-                        );
-                        if (isRising) risingTopics = list.rankedKeyword;
-                        else topTopics = list.rankedKeyword;
-                    }
+            for (const list of (capturedData.relatedTopics || [])) {
+                if (list.rankedKeyword) {
+                    const isRising = list.rankedKeyword.some(i =>
+                        i.formattedValue?.includes('%') || i.formattedValue?.toLowerCase() === 'breakout'
+                    );
+                    if (isRising) risingTopics = list.rankedKeyword;
+                    else topTopics = list.rankedKeyword;
                 }
             }
 
-            if (capturedData.relatedQueries) {
-                for (const list of capturedData.relatedQueries) {
-                    if (list.rankedKeyword) {
-                        const isRising = list.rankedKeyword.some(item =>
-                            item.formattedValue?.includes('%') || item.formattedValue?.toLowerCase() === 'breakout'
-                        );
-                        if (isRising) risingQueries = list.rankedKeyword;
-                        else topQueries = list.rankedKeyword;
-                    }
+            for (const list of (capturedData.relatedQueries || [])) {
+                if (list.rankedKeyword) {
+                    const isRising = list.rankedKeyword.some(i =>
+                        i.formattedValue?.includes('%') || i.formattedValue?.toLowerCase() === 'breakout'
+                    );
+                    if (isRising) risingQueries = list.rankedKeyword;
+                    else topQueries = list.rankedKeyword;
                 }
             }
 
@@ -351,21 +303,21 @@ async function main() {
                 relatedQueries_rising: risingQueries
             };
 
-            // Only save if we got data
-            if (result.interestOverTime_timelineData.length > 0 ||
-                result.relatedTopics_top.length > 0 ||
-                result.relatedQueries_top.length > 0) {
+            const hasData = result.interestOverTime_timelineData.length > 0 ||
+                topTopics.length > 0 || topQueries.length > 0;
+
+            if (hasData) {
                 await Actor.pushData(result);
                 successCount++;
-                log.info(`✓ SAVED: "${searchTerm}" (${result.interestOverTime_timelineData.length} timeline pts)`);
+                log.info(`✓ SAVED "${searchTerm}"`);
             } else {
                 log.warning(`  No data captured for "${searchTerm}"`);
             }
 
-            // Delay between terms
+            // Delay between terms - longer to avoid rate limits
             if (i < processLimit - 1) {
-                const delay = randomDelay(10000, 20000);
-                log.info(`Waiting ${Math.round(delay / 1000)}s before next term...`);
+                const delay = randomDelay(15000, 30000);
+                log.info(`Cooling down ${Math.round(delay / 1000)}s...`);
                 await sleep(delay);
             }
         }
@@ -376,13 +328,13 @@ async function main() {
     }
 
     log.info('═══════════════════════════════════════════');
-    log.info(`    Results: ${successCount}/${processLimit} successful`);
+    log.info(`    Done: ${successCount}/${processLimit} saved`);
     log.info('═══════════════════════════════════════════');
 
     await Actor.exit();
 }
 
 main().catch(err => {
-    log.error('Fatal error:', err);
+    log.error('Fatal:', err);
     process.exit(1);
 });
