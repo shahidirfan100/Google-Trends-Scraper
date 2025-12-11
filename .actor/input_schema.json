@@ -1,0 +1,111 @@
+{
+  "title": "Google Trends Scraper",
+  "description": "Extract Google Trends data including interest over time, geographic interest, related topics, and related queries.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "searchTerms": {
+      "title": "Search terms",
+      "type": "array",
+      "description": "List of search terms to scrape from Google Trends. Each term will be processed separately.",
+      "editor": "stringList",
+      "prefill": [
+        "web scraping"
+      ],
+      "example": [
+        "artificial intelligence",
+        "machine learning"
+      ]
+    },
+    "startUrls": {
+      "title": "Google Trends URLs",
+      "type": "array",
+      "description": "Direct Google Trends explore URLs with pre-applied filters. If provided, parameters from URLs take precedence.",
+      "editor": "requestListSources"
+    },
+    "geo": {
+      "title": "Geographic region",
+      "type": "string",
+      "description": "Two-letter country code (e.g., US, GB, DE) or leave empty for worldwide data.",
+      "editor": "textfield",
+      "default": "",
+      "example": "US"
+    },
+    "timeRange": {
+      "title": "Time range",
+      "type": "string",
+      "description": "Predefined time range for the search.",
+      "editor": "select",
+      "enum": [
+        "",
+        "now 1-H",
+        "now 4-H",
+        "now 1-d",
+        "now 7-d",
+        "today 1-m",
+        "today 3-m",
+        "today 12-m",
+        "today 5-y",
+        "all"
+      ],
+      "enumTitles": [
+        "Default (Past 12 months)",
+        "Past hour",
+        "Past 4 hours",
+        "Past day",
+        "Past 7 days",
+        "Past 30 days",
+        "Past 90 days",
+        "Past 12 months",
+        "Past 5 years",
+        "2004-present"
+      ],
+      "default": ""
+    },
+    "customTimeRange": {
+      "title": "Custom time range",
+      "type": "string",
+      "description": "Custom date range in format 'YYYY-MM-DD YYYY-MM-DD'. Takes precedence over timeRange if provided.",
+      "editor": "textfield",
+      "example": "2023-01-01 2024-01-01"
+    },
+    "category": {
+      "title": "Category",
+      "type": "integer",
+      "description": "Google Trends category ID. Use 0 for all categories.",
+      "editor": "number",
+      "default": 0
+    },
+    "isMultiple": {
+      "title": "Multiple terms (comma-separated)",
+      "type": "boolean",
+      "description": "If checked, commas in search terms will be treated as multiple separate terms.",
+      "editor": "checkbox",
+      "default": false
+    },
+    "maxItems": {
+      "title": "Max items",
+      "type": "integer",
+      "description": "Maximum number of search terms to process. 0 means no limit.",
+      "editor": "number",
+      "default": 0
+    },
+    "maxRequestRetries": {
+      "title": "Max request retries",
+      "type": "integer",
+      "description": "Number of retry attempts for failed requests.",
+      "editor": "number",
+      "default": 5
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Proxy settings for the requests.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true
+      }
+    }
+  },
+  "required": []
+}

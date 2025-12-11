@@ -1,0 +1,60 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "searchTerm",
+          "inputUrlOrTerm",
+          "geo",
+          "timeRange"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "searchTerm": {
+            "label": "Search Term",
+            "format": "text"
+          },
+          "inputUrlOrTerm": {
+            "label": "Input",
+            "format": "text"
+          },
+          "geo": {
+            "label": "Region",
+            "format": "text"
+          },
+          "timeRange": {
+            "label": "Time Range",
+            "format": "text"
+          }
+        }
+      }
+    },
+    "interestOverTime": {
+      "title": "Interest Over Time",
+      "transformation": {
+        "fields": [
+          "searchTerm",
+          "interestOverTime_timelineData"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "searchTerm": {
+            "label": "Search Term",
+            "format": "text"
+          },
+          "interestOverTime_timelineData": {
+            "label": "Timeline Data",
+            "format": "object"
+          }
+        }
+      }
+    }
+  }
+}

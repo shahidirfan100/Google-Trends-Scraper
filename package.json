@@ -1,0 +1,13 @@
+{
+  "name": "google-trends-scraper",
+  "version": "1.0.0",
+  "description": "Extract Google Trends data including interest over time, geographic interest, related topics, and related queries.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.js"
+  },
+  "dependencies": {
+    "apify": "^3.4.5",
+    "got-scraping": "^4.1.2"
+  }
+}

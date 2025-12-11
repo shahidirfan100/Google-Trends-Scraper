@@ -1,0 +1,10 @@
+{
+  "searchTerms": [
+    "artificial intelligence",
+    "machine learning"
+  ],
+  "geo": "US",
+  "timeRange": "today 12-m",
+  "category": 0,
+  "maxRequestRetries": 5
+}
