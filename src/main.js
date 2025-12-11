@@ -1,7 +1,7 @@
 // Google Trends Scraper - Replicates Apify Google Trends Scraper functionality
 // Uses two-step approach: 1) Get widget tokens from /explore, 2) Fetch data from widget endpoints
 import { Actor, log } from 'apify';
-import gotScraping from 'got-scraping';
+import { gotScraping } from 'got-scraping';
 
 await Actor.init();
 
